@@ -1,0 +1,6 @@
+aiogram>=3.13,<4
+aiosqlite>=0.20
+libsql-client>=0.3
+APScheduler>=3.10
+pydantic-settings>=2.5
+PyYAML>=6.0

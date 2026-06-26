@@ -1,0 +1,30 @@
+# Render Blueprint. В дашборде: New + -> Blueprint -> подключить этот репозиторий.
+# Render прочитает файл и создаст web-сервис из Dockerfile. Значения секретов
+# (sync: false) нужно вписать в дашборде после создания.
+services:
+  - type: web
+    name: mlsobesbot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      # Публичный адрес сервиса (Render подставит хост сам).
+      - key: WEBHOOK_URL
+        fromService:
+          type: web
+          name: mlsobesbot
+          property: url
+      - key: TZ
+        value: Europe/Moscow
+      - key: QOTD_HOUR
+        value: "9"
+      - key: KEEPALIVE_MINUTES
+        value: "10"
