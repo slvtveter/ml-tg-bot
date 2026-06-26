@@ -16,12 +16,10 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
-      # Публичный адрес сервиса (Render подставит хост сам).
+      # Публичный адрес сервиса. Впиши вручную после первого деплоя,
+      # например https://mlsobesbot.onrender.com (без /webhook на конце).
       - key: WEBHOOK_URL
-        fromService:
-          type: web
-          name: mlsobesbot
-          property: url
+        sync: false
       - key: TZ
         value: Europe/Moscow
       - key: QOTD_HOUR
