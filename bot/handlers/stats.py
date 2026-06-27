@@ -19,13 +19,15 @@ def _bar(learned: int, total: int, width: int = 10) -> str:
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message) -> None:
+    await db.ensure_cards(message.from_user.id)
     s = await db.get_stats(message.from_user.id)
 
     lines = [
         "📊 <b>Твой прогресс</b>\n",
-        f"Всего вопросов: <b>{s['total']}</b>",
-        f"Начато (хоть раз отвечал): <b>{s['reviewed']}</b>",
-        f"Готово к повторению сейчас: <b>{s['due']}</b>",
+        f"Изучено карточек: <b>{s['seen']}</b> из {s['total']}",
+        f"Осталось новых: <b>{s['new_total']}</b>",
+        f"\n<b>Сегодня к работе:</b> {s['due_review']} к повторению + "
+        f"{s['new_today']} новых",
         f"Всего ответов дано: <b>{s['total_reviews']}</b>",
         "\n<b>Освоение по уровням</b> (вопросы, вышедшие на повтор):",
     ]

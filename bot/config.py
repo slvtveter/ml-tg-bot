@@ -16,7 +16,14 @@ class Settings(BaseSettings):
     qotd_minute: int = 0
     # Час ежедневного напоминания о карточках к повторению (due).
     reminder_hour: int = 20
+    # Сколько НОВЫХ карточек вводить в день (дозированный spaced repetition).
+    daily_new_limit: int = 15
     db_path: str = "data/bot.db"
+
+    # LLM-проверка ответов (Google Gemini). Если ключ пуст — режим выключен.
+    gemini_api_key: str = ""
+    # Цепочка моделей: при лимите/ошибке на одной запрос идёт на следующую.
+    gemini_models: str = "gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash"
 
     # Turso/libSQL (прод-персистентность). Если пусто — берётся локальный SQLite.
     turso_database_url: str = ""
@@ -39,6 +46,11 @@ class Settings(BaseSettings):
         """Абсолютный путь к файлу БД."""
         p = Path(self.db_path)
         return p if p.is_absolute() else BASE_DIR / p
+
+    @property
+    def gemini_model_list(self) -> list[str]:
+        """Модели Gemini в порядке fallback."""
+        return [m.strip() for m in self.gemini_models.split(",") if m.strip()]
 
 
 settings = Settings()

@@ -40,13 +40,15 @@ async def send_due_reminder(bot: Bot) -> None:
     subscribers = await db.get_subscribers()
     for user in subscribers:
         await db.ensure_cards(user["user_id"])
-        due = await db.count_due_cards(user["user_id"])
-        if due <= 0:
+        wl = await db.count_today_workload(user["user_id"])
+        if wl["total"] <= 0:
             continue
-        text = (
-            f"⏰ <b>{due}</b> карточек ждут повторения. "
-            "Закрепи, пока не забылось — жми /quiz"
-        )
+        parts = []
+        if wl["due_review"]:
+            parts.append(f"{wl['due_review']} к повторению")
+        if wl["new_today"]:
+            parts.append(f"{wl['new_today']} новых")
+        text = "⏰ Сегодня к изучению: <b>" + " + ".join(parts) + "</b>. Жми /quiz 💪"
         try:
             await bot.send_message(user["chat_id"], text)
         except TelegramForbiddenError:

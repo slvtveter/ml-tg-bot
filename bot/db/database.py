@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
+from bot.config import settings
 from bot.db import backend
 from bot.services.spaced_repetition import CardState, new_card
 
@@ -69,6 +71,30 @@ def _utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
+def _today_start_utc_iso() -> str:
+    """Начало текущего дня в TZ пользователя, в UTC ISO (для дневных лимитов)."""
+    tz = ZoneInfo(settings.tz)
+    start_local = dt.datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_local.astimezone(dt.timezone.utc).isoformat()
+
+
+async def new_introduced_today(user_id: int) -> int:
+    """Сколько НОВЫХ карточек пользователь впервые увидел сегодня.
+
+    «Новая впервые сегодня» = самый ранний review карточки приходится на сегодня.
+    """
+    row = await backend.fetchone(
+        """SELECT COUNT(*) c FROM (
+               SELECT question_id, MIN(reviewed_at) AS first_seen
+               FROM reviews WHERE user_id=?
+               GROUP BY question_id
+               HAVING first_seen >= ?
+           )""",
+        (user_id, _today_start_utc_iso()),
+    )
+    return row["c"] if row else 0
+
+
 async def init_db() -> None:
     """Создать таблицы, если их ещё нет."""
     await backend.executescript(SCHEMA)
@@ -117,13 +143,20 @@ async def ensure_cards(user_id: int) -> None:
 
 
 async def pick_due_card(
-    user_id: int, exclude_id: Optional[int] = None, level_id: Optional[int] = None
+    user_id: int, exclude_id: Optional[int] = None, level_id: Optional[int] = None,
+    respect_new_limit: bool = True,
 ) -> Optional[dict[str, Any]]:
-    """Вернуть наиболее «просроченную» карточку (due <= сейчас).
+    """Следующая карточка с дозированным вводом новых (настоящий spaced repetition).
 
-    Если due-карточек нет — берём самую раннюю предстоящую, чтобы тренировка
-    не упиралась в пустоту. exclude_id не даёт показать тот же вопрос дважды
-    подряд. level_id ограничивает выбор одним уровнем (по родителю темы).
+    Приоритет:
+      1) К ПОВТОРЕНИЮ — уже виденные карточки, у которых наступил срок (due<=now);
+         их пропускать нельзя, иначе теряется смысл интервального повторения.
+      2) НОВЫЕ — но не больше daily_new_limit в день (в обычном /quiz). При фокусе
+         на уровне (level_id задан) лимит не применяется — это осознанная
+         проработка темы (например, перед собесом).
+
+    Возвращает None, когда на сегодня всё: нет due-повторов и дневной лимит новых
+    исчерпан. exclude_id не даёт показать тот же вопрос дважды подряд.
     """
     now = _utc_now_iso()
     conds = ["c.user_id = ?"]
@@ -136,22 +169,31 @@ async def pick_due_card(
         params.append(level_id)
     where = " AND ".join(conds)
 
-    base = f"""
-        SELECT q.id, q.question, q.answer, q.difficulty, t.name AS topic_name,
-               c.ease_factor, c.interval, c.repetitions, c.due
-        FROM cards c
-        JOIN questions q ON q.id = c.question_id
-        JOIN topics t ON t.id = q.topic_id
-        WHERE {where} {{due}}
-        ORDER BY c.due ASC
-        LIMIT 1
-    """
-    # Сначала — то, что уже пора повторять.
-    row = await backend.fetchone(base.format(due="AND c.due <= ?"), (*params, now))
-    if row is None:
-        # Ничего не пора — берём ближайшее будущее (тренировка «наперёд»).
-        row = await backend.fetchone(base.format(due=""), params)
-    return row
+    cols = ("q.id, q.question, q.answer, q.difficulty, t.name AS topic_name, "
+            "c.ease_factor, c.interval, c.repetitions, c.due")
+    frm = ("FROM cards c JOIN questions q ON q.id = c.question_id "
+           "JOIN topics t ON t.id = q.topic_id")
+    seen = ("EXISTS (SELECT 1 FROM reviews r "
+            "WHERE r.user_id = c.user_id AND r.question_id = c.question_id)")
+
+    # 1) Уже виденные и пора повторить.
+    row = await backend.fetchone(
+        f"SELECT {cols} {frm} WHERE {where} AND c.due <= ? AND {seen} "
+        f"ORDER BY c.due ASC LIMIT 1",
+        (*params, now),
+    )
+    if row is not None:
+        return row
+
+    # 2) Новые — с учётом дневного лимита (кроме фокуса на уровне).
+    if respect_new_limit and level_id is None:
+        if await new_introduced_today(user_id) >= settings.daily_new_limit:
+            return None
+    return await backend.fetchone(
+        f"SELECT {cols} {frm} WHERE {where} AND NOT {seen} "
+        f"ORDER BY t.sort, q.id LIMIT 1",
+        params,
+    )
 
 
 async def list_levels() -> list[dict[str, Any]]:
@@ -208,29 +250,41 @@ async def get_question(question_id: int) -> Optional[dict[str, Any]]:
     )
 
 
-async def count_due_cards(user_id: int) -> int:
-    """Сколько карточек уже пора повторить (due <= сейчас)."""
-    row = await backend.fetchone(
-        "SELECT COUNT(*) c FROM cards WHERE user_id=? AND due<=?",
-        (user_id, _utc_now_iso()),
-    )
-    return row["c"] if row else 0
+_SEEN = ("EXISTS (SELECT 1 FROM reviews r "
+         "WHERE r.user_id = cards.user_id AND r.question_id = cards.question_id)")
+
+
+async def count_today_workload(user_id: int) -> dict[str, int]:
+    """Сколько карточек реально к работе сегодня: due-повторы + остаток новых."""
+    now = _utc_now_iso()
+    due_review = (await backend.fetchone(
+        f"SELECT COUNT(*) c FROM cards WHERE user_id=? AND due<=? AND {_SEEN}",
+        (user_id, now),
+    ))["c"]
+    new_total = (await backend.fetchone(
+        f"SELECT COUNT(*) c FROM cards WHERE user_id=? AND NOT {_SEEN}", (user_id,),
+    ))["c"]
+    remaining = max(0, settings.daily_new_limit - await new_introduced_today(user_id))
+    new_today = min(new_total, remaining)
+    return {
+        "due_review": due_review,
+        "new_today": new_today,
+        "new_total": new_total,
+        "total": due_review + new_today,
+    }
 
 
 # ---------- статистика ----------
 
 async def get_stats(user_id: int) -> dict[str, Any]:
-    now = _utc_now_iso()
     total = (await backend.fetchone("SELECT COUNT(*) c FROM questions"))["c"]
-    reviewed = (await backend.fetchone(
-        "SELECT COUNT(*) c FROM cards WHERE user_id=? AND repetitions>0", (user_id,)
-    ))["c"]
-    due = (await backend.fetchone(
-        "SELECT COUNT(*) c FROM cards WHERE user_id=? AND due<=?", (user_id, now)
+    seen = (await backend.fetchone(
+        f"SELECT COUNT(*) c FROM cards WHERE user_id=? AND {_SEEN}", (user_id,)
     ))["c"]
     total_reviews = (await backend.fetchone(
         "SELECT COUNT(*) c FROM reviews WHERE user_id=?", (user_id,)
     ))["c"]
+    workload = await count_today_workload(user_id)
 
     # Освоение по уровням: доля вопросов с repetitions>=2 (вышли на нормальный
     # интервал) внутри каждого уровня roadmap (родитель темы).
@@ -248,8 +302,10 @@ async def get_stats(user_id: int) -> dict[str, Any]:
     )
     return {
         "total": total,
-        "reviewed": reviewed,
-        "due": due,
+        "seen": seen,
+        "new_total": workload["new_total"],
+        "due_review": workload["due_review"],
+        "new_today": workload["new_today"],
         "total_reviews": total_reviews,
         "by_level": by_level,
     }

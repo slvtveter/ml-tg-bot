@@ -58,10 +58,18 @@ async def send_next_card(message: Message, user_id: int, exclude_id: Optional[in
     level_id = _user_level.get(user_id)
     card = await db.pick_due_card(user_id, exclude_id=exclude_id, level_id=level_id)
     if card is None:
-        await message.answer(
-            "В этом уровне пока нет карточек 🤷 Выбери другой: /levels "
-            "или гоняй всю базу: /quiz"
-        )
+        if level_id is None:
+            await message.answer(
+                "🎉 <b>На сегодня всё!</b>\n\nПовторения закрыты, дневная порция "
+                "новых карточек введена. Именно так работает spaced repetition — "
+                "по чуть-чуть каждый день, и память держится.\n\n"
+                "Хочешь ещё проработать тему — выбери уровень: /levels"
+            )
+        else:
+            await message.answer(
+                "✅ По этому уровню карточек к показу сейчас нет.\n"
+                "Другой уровень: /levels · вся база: /quiz"
+            )
         return
     await message.answer(_question_text(card), reply_markup=kb.show_answer_kb(card["id"]))
 
