@@ -7,15 +7,23 @@ from typing import Any, Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from bot import keyboards as kb
 from bot.db import database as db
+from bot.services import llm_grader
 from bot.services import spaced_repetition as sr
 
 router = Router()
 
 RATING_LABEL = {"again": "❌ Не знал", "partial": "🤔 Частично", "known": "✅ Знал"}
+VERDICT_EMOJI = {"again": "❌", "partial": "🤔", "known": "✅"}
+
+
+class AnswerStates(StatesGroup):
+    waiting = State()  # ждём текстовый ответ пользователя на конкретный вопрос
 
 # Текущий выбранный уровень на пользователя (None = вся база, spaced repetition).
 # In-memory: сбрасывается при рестарте — это ок, прогресс хранится в БД.
@@ -71,19 +79,24 @@ async def send_next_card(message: Message, user_id: int, exclude_id: Optional[in
                 "Другой уровень: /levels · вся база: /quiz"
             )
         return
-    await message.answer(_question_text(card), reply_markup=kb.show_answer_kb(card["id"]))
+    await message.answer(
+        _question_text(card),
+        reply_markup=kb.show_answer_kb(card["id"], allow_text=llm_grader.is_enabled()),
+    )
 
 
 @router.message(Command("quiz"))
-async def cmd_quiz(message: Message) -> None:
+async def cmd_quiz(message: Message, state: FSMContext) -> None:
     # /quiz — вся база (чистый spaced repetition). Для фокуса по уровню — /levels.
+    await state.clear()
     _user_level[message.from_user.id] = None
     await db.ensure_cards(message.from_user.id)
     await send_next_card(message, message.from_user.id)
 
 
 @router.message(Command("levels"))
-async def cmd_levels(message: Message) -> None:
+async def cmd_levels(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await db.ensure_cards(message.from_user.id)
     levels = await db.list_levels()
     if not levels:
@@ -113,6 +126,59 @@ async def on_show_answer(callback: CallbackQuery) -> None:
         return
     await callback.message.edit_text(_answer_text(card), reply_markup=kb.rating_kb(question_id))
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("answer:"))
+async def on_answer_request(callback: CallbackQuery, state: FSMContext) -> None:
+    question_id = int(callback.data.split(":")[1])
+    await state.set_state(AnswerStates.waiting)
+    await state.update_data(question_id=question_id)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        "✍️ Напиши свой ответ одним сообщением — проверю и разберу."
+    )
+    await callback.answer()
+
+
+@router.message(AnswerStates.waiting, F.text, ~F.text.startswith("/"))
+async def on_text_answer(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    question_id = data.get("question_id")
+    await state.clear()
+
+    card = await db.get_question(question_id)
+    if card is None:
+        await message.answer("Вопрос не найден. Жми /quiz")
+        return
+
+    thinking = await message.answer("⏳ Проверяю ответ…")
+    result = await llm_grader.grade(card["question"], card["answer"], message.text)
+
+    if result is None:
+        # LLM недоступна (нет ключа / все модели упали) — ручной режим.
+        await thinking.edit_text(
+            "⚠️ Не смог проверить ответ автоматически. Вот эталон — оцени себя сам:\n\n"
+            + _answer_text(card),
+            reply_markup=kb.rating_kb(question_id),
+        )
+        return
+
+    verdict = result["verdict"]
+    cs = await db.get_card_state(message.from_user.id, question_id)
+    due_txt = ""
+    if cs is not None:
+        new_state = sr.review(cs, verdict)
+        await db.save_review(message.from_user.id, question_id, verdict, new_state)
+        due_txt = _human_due(new_state)
+
+    text = (
+        f"{VERDICT_EMOJI[verdict]} <b>Оценка ответа</b>\n\n"
+        f"{html.escape(result['feedback'])}\n\n"
+        f"<b>Эталон:</b>\n{html.escape(card['answer'])}\n\n"
+        f"<i>Записал как «{RATING_LABEL[verdict]}» · повтор {due_txt}</i>"
+    )
+    await thinking.edit_text(text)
+    await send_next_card(message, message.from_user.id, exclude_id=question_id)
 
 
 @router.callback_query(F.data.startswith("rate:"))

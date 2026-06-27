@@ -3,9 +3,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-def show_answer_kb(question_id: int) -> InlineKeyboardMarkup:
+def show_answer_kb(question_id: int, allow_text: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="👀 Показать ответ", callback_data=f"show:{question_id}")
+    if allow_text:
+        kb.button(text="✍️ Ответить текстом", callback_data=f"answer:{question_id}")
+    kb.adjust(1)
     return kb.as_markup()
 
 
