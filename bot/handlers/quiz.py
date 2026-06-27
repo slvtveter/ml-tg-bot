@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -25,9 +26,16 @@ VERDICT_EMOJI = {"again": "❌", "partial": "🤔", "known": "✅"}
 class AnswerStates(StatesGroup):
     waiting = State()  # ждём текстовый ответ пользователя на конкретный вопрос
 
-# Текущий выбранный уровень на пользователя (None = вся база, spaced repetition).
-# In-memory: сбрасывается при рестарте — это ок, прогресс хранится в БД.
-_user_level: dict[int, Optional[int]] = {}
+# Сессионное состояние на пользователя (in-memory, сбрасывается при рестарте —
+# это ок, прогресс хранится в БД).
+_user_level: dict[int, Optional[int]] = {}        # фильтр по уровню (None = вся база)
+_user_difficulty: dict[int, Optional[int]] = {}   # фильтр по сложности (None = любая)
+_recent: dict[int, deque] = {}                    # недавно показанные id (анти-повтор)
+RECENT_SIZE = 6
+
+
+def _remember(user_id: int, question_id: int) -> None:
+    _recent.setdefault(user_id, deque(maxlen=RECENT_SIZE)).append(question_id)
 
 
 def _stars(difficulty: int) -> str:
@@ -61,24 +69,32 @@ def _human_due(state: sr.CardState) -> str:
     return f"через {days} дн."
 
 
-async def send_next_card(message: Message, user_id: int, exclude_id: Optional[int] = None) -> None:
-    """Достать следующую карточку (с учётом выбранного уровня) и отправить."""
+async def send_next_card(message: Message, user_id: int) -> None:
+    """Следующая карточка: случайный порядок + анти-повтор + фильтры уровня/сложности."""
     level_id = _user_level.get(user_id)
-    card = await db.pick_due_card(user_id, exclude_id=exclude_id, level_id=level_id)
+    diff = _user_difficulty.get(user_id)
+    recents = list(_recent.get(user_id, ()))
+    card = await db.pick_due_card(
+        user_id, exclude_ids=recents, level_id=level_id, difficulty=diff
+    )
+    if card is None and recents:
+        # Все подходящие карточки были показаны только что — снимаем анти-повтор.
+        card = await db.pick_due_card(user_id, level_id=level_id, difficulty=diff)
     if card is None:
-        if level_id is None:
+        if level_id is None and diff is None:
             await message.answer(
                 "🎉 <b>На сегодня всё!</b>\n\nПовторения закрыты, дневная порция "
                 "новых карточек введена. Именно так работает spaced repetition — "
                 "по чуть-чуть каждый день, и память держится.\n\n"
-                "Хочешь ещё проработать тему — выбери уровень: /levels"
+                "Хочешь ещё — выбери уровень: /levels или сложность: /difficulty"
             )
         else:
             await message.answer(
-                "✅ По этому уровню карточек к показу сейчас нет.\n"
-                "Другой уровень: /levels · вся база: /quiz"
+                "✅ По выбранным фильтрам карточек сейчас нет.\n"
+                "Сброс фильтров: /quiz · уровень: /levels · сложность: /difficulty"
             )
         return
+    _remember(user_id, card["id"])
     await message.answer(
         _question_text(card),
         reply_markup=kb.show_answer_kb(card["id"], allow_text=llm_grader.is_enabled()),
@@ -87,9 +103,10 @@ async def send_next_card(message: Message, user_id: int, exclude_id: Optional[in
 
 @router.message(Command("quiz"))
 async def cmd_quiz(message: Message, state: FSMContext) -> None:
-    # /quiz — вся база (чистый spaced repetition). Для фокуса по уровню — /levels.
+    # /quiz — вся база, без фильтров (чистый spaced repetition).
     await state.clear()
     _user_level[message.from_user.id] = None
+    _user_difficulty[message.from_user.id] = None
     await db.ensure_cards(message.from_user.id)
     await send_next_card(message, message.from_user.id)
 
@@ -113,6 +130,24 @@ async def cmd_levels(message: Message, state: FSMContext) -> None:
 async def on_pick_level(callback: CallbackQuery) -> None:
     value = callback.data.split(":")[1]
     _user_level[callback.from_user.id] = None if value == "all" else int(value)
+    await callback.answer("Поехали!")
+    await send_next_card(callback.message, callback.from_user.id)
+
+
+@router.message(Command("difficulty"))
+async def cmd_difficulty(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await db.ensure_cards(message.from_user.id)
+    await message.answer(
+        "🎚 <b>Выбери сложность</b> вопросов (фильтр совмещается с уровнем):",
+        reply_markup=kb.difficulty_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("diff:"))
+async def on_pick_difficulty(callback: CallbackQuery) -> None:
+    value = callback.data.split(":")[1]
+    _user_difficulty[callback.from_user.id] = None if value == "all" else int(value)
     await callback.answer("Поехали!")
     await send_next_card(callback.message, callback.from_user.id)
 
@@ -178,7 +213,7 @@ async def on_text_answer(message: Message, state: FSMContext) -> None:
         f"<i>Записал как «{RATING_LABEL[verdict]}» · повтор {due_txt}</i>"
     )
     await thinking.edit_text(text)
-    await send_next_card(message, message.from_user.id, exclude_id=question_id)
+    await send_next_card(message, message.from_user.id)
 
 
 @router.callback_query(F.data.startswith("rate:"))
@@ -199,8 +234,8 @@ async def on_rate(callback: CallbackQuery) -> None:
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer(f"{RATING_LABEL[rating]} · повтор {_human_due(new_state)}")
 
-    # Сразу следующий вопрос (тот же не показываем).
-    await send_next_card(callback.message, user_id, exclude_id=question_id)
+    # Сразу следующий вопрос (анти-повтор не покажет тот же).
+    await send_next_card(callback.message, user_id)
 
 
 @router.callback_query(F.data == "next")

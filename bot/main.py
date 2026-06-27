@@ -38,6 +38,7 @@ async def set_commands(bot: Bot) -> None:
     await bot.set_my_commands([
         BotCommand(command="quiz", description="Случайный вопрос (вся база)"),
         BotCommand(command="levels", description="Выбрать уровень roadmap"),
+        BotCommand(command="difficulty", description="Фильтр по сложности"),
         BotCommand(command="stats", description="Прогресс по уровням"),
         BotCommand(command="subscribe", description="Включить рассылку"),
         BotCommand(command="unsubscribe", description="Выключить рассылку"),

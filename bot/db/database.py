@@ -143,7 +143,8 @@ async def ensure_cards(user_id: int) -> None:
 
 
 async def pick_due_card(
-    user_id: int, exclude_id: Optional[int] = None, level_id: Optional[int] = None,
+    user_id: int, exclude_ids: Optional[list[int]] = None,
+    level_id: Optional[int] = None, difficulty: Optional[int] = None,
     respect_new_limit: bool = True,
 ) -> Optional[dict[str, Any]]:
     """Следующая карточка с дозированным вводом новых (настоящий spaced repetition).
@@ -152,21 +153,24 @@ async def pick_due_card(
       1) К ПОВТОРЕНИЮ — уже виденные карточки, у которых наступил срок (due<=now);
          их пропускать нельзя, иначе теряется смысл интервального повторения.
       2) НОВЫЕ — но не больше daily_new_limit в день (в обычном /quiz). При фокусе
-         на уровне (level_id задан) лимит не применяется — это осознанная
-         проработка темы (например, перед собесом).
+         на уровне (level_id задан) лимит не применяется — осознанная проработка.
 
-    Возвращает None, когда на сегодня всё: нет due-повторов и дневной лимит новых
-    исчерпан. exclude_id не даёт показать тот же вопрос дважды подряд.
+    Порядок внутри пула — случайный (разнообразие, без зацикливания на одной
+    карточке). exclude_ids исключает недавно показанные. level_id/difficulty —
+    фильтры. Возвращает None, когда на сегодня всё.
     """
     now = _utc_now_iso()
     conds = ["c.user_id = ?"]
     params: list[Any] = [user_id]
-    if exclude_id is not None:
-        conds.append("q.id != ?")
-        params.append(exclude_id)
+    if exclude_ids:
+        conds.append(f"q.id NOT IN ({','.join('?' for _ in exclude_ids)})")
+        params.extend(exclude_ids)
     if level_id is not None:
         conds.append("t.parent_id = ?")
         params.append(level_id)
+    if difficulty is not None:
+        conds.append("q.difficulty = ?")
+        params.append(difficulty)
     where = " AND ".join(conds)
 
     cols = ("q.id, q.question, q.answer, q.difficulty, t.name AS topic_name, "
@@ -176,22 +180,22 @@ async def pick_due_card(
     seen = ("EXISTS (SELECT 1 FROM reviews r "
             "WHERE r.user_id = c.user_id AND r.question_id = c.question_id)")
 
-    # 1) Уже виденные и пора повторить.
+    # 1) Уже виденные и пора повторить — случайный порядок среди due.
     row = await backend.fetchone(
         f"SELECT {cols} {frm} WHERE {where} AND c.due <= ? AND {seen} "
-        f"ORDER BY c.due ASC LIMIT 1",
+        f"ORDER BY RANDOM() LIMIT 1",
         (*params, now),
     )
     if row is not None:
         return row
 
-    # 2) Новые — с учётом дневного лимита (кроме фокуса на уровне).
+    # 2) Новые — случайный порядок, с учётом дневного лимита (кроме фокуса на уровне).
     if respect_new_limit and level_id is None:
         if await new_introduced_today(user_id) >= settings.daily_new_limit:
             return None
     return await backend.fetchone(
         f"SELECT {cols} {frm} WHERE {where} AND NOT {seen} "
-        f"ORDER BY t.sort, q.id LIMIT 1",
+        f"ORDER BY RANDOM() LIMIT 1",
         params,
     )
 

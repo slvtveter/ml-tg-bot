@@ -65,10 +65,12 @@ def review(state: CardState, rating: str) -> CardState:
     reps = state.repetitions
 
     if q < 3:
-        # Провал: сбрасываем серию, показываем снова в этой же сессии.
+        # Провал: сбрасываем серию. Возвращаем не сразу (иначе один и тот же
+        # вопрос крутится по кругу), а через ~10 мин — всплывёт позже в сессии,
+        # вперемешку с другими.
         reps = 0
         interval = 0
-        due = _now() + timedelta(minutes=1)
+        due = _now() + timedelta(minutes=10)
     else:
         # Успех: наращиваем интервал.
         if reps == 0:

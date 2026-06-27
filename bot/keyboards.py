@@ -28,6 +28,17 @@ def next_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def difficulty_kb() -> InlineKeyboardMarkup:
+    """Выбор сложности вопросов."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⭐ Лёгкие", callback_data="diff:1")
+    kb.button(text="⭐⭐ Средние", callback_data="diff:2")
+    kb.button(text="⭐⭐⭐ Сложные", callback_data="diff:3")
+    kb.button(text="🎲 Любая сложность", callback_data="diff:all")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def levels_kb(levels: list[dict]) -> InlineKeyboardMarkup:
     """Список уровней roadmap + режим «вся база» (spaced repetition)."""
     kb = InlineKeyboardBuilder()

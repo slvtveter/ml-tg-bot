@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 from bot.config import settings
-from bot.db import database as db
+from bot.db import backend, database as db
 from bot.services import spaced_repetition as sr
 from bot.services.spaced_repetition import CardState
 
@@ -82,3 +82,23 @@ async def test_new_introduced_today(populated):
     card = await db.pick_due_card(USER)
     await _rate(USER, card["id"], "known")
     assert await db.new_introduced_today(USER) == 1
+
+
+async def test_exclude_ids_avoids_repeat(populated):
+    await db.ensure_cards(USER)
+    c1 = await db.pick_due_card(USER)
+    c2 = await db.pick_due_card(USER, exclude_ids=[c1["id"]])
+    assert c2 is not None and c2["id"] != c1["id"]
+
+
+async def test_difficulty_filter(populated):
+    await backend.execute(
+        "INSERT INTO questions (topic_id, question, answer, difficulty, source, uid) "
+        "VALUES (?, ?, ?, ?, 'seed', ?)",
+        (populated["topic"], "Сложный", "Ответ", 3, "uhard"),
+    )
+    await db.ensure_cards(USER)
+    card = await db.pick_due_card(USER, difficulty=3)
+    assert card is not None and card["difficulty"] == 3
+    # единственную сложную исключаем -> по сложности 3 ничего не остаётся
+    assert await db.pick_due_card(USER, difficulty=3, exclude_ids=[card["id"]]) is None
