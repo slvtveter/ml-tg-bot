@@ -17,6 +17,10 @@ router = Router()
 
 RATING_LABEL = {"again": "❌ Не знал", "partial": "🤔 Частично", "known": "✅ Знал"}
 
+# Текущий выбранный уровень на пользователя (None = вся база, spaced repetition).
+# In-memory: сбрасывается при рестарте — это ок, прогресс хранится в БД.
+_user_level: dict[int, Optional[int]] = {}
+
 
 def _stars(difficulty: int) -> str:
     return "⭐" * max(1, min(3, difficulty))
@@ -50,12 +54,13 @@ def _human_due(state: sr.CardState) -> str:
 
 
 async def send_next_card(message: Message, user_id: int, exclude_id: Optional[int] = None) -> None:
-    """Достать следующую карточку и отправить новым сообщением."""
-    card = await db.pick_due_card(user_id, exclude_id=exclude_id)
+    """Достать следующую карточку (с учётом выбранного уровня) и отправить."""
+    level_id = _user_level.get(user_id)
+    card = await db.pick_due_card(user_id, exclude_id=exclude_id, level_id=level_id)
     if card is None:
         await message.answer(
-            "В банке пока нет вопросов 🤷 Добавь их в data/questions.yaml "
-            "и перезапусти бота."
+            "В этом уровне пока нет карточек 🤷 Выбери другой: /levels "
+            "или гоняй всю базу: /quiz"
         )
         return
     await message.answer(_question_text(card), reply_markup=kb.show_answer_kb(card["id"]))
@@ -63,8 +68,32 @@ async def send_next_card(message: Message, user_id: int, exclude_id: Optional[in
 
 @router.message(Command("quiz"))
 async def cmd_quiz(message: Message) -> None:
+    # /quiz — вся база (чистый spaced repetition). Для фокуса по уровню — /levels.
+    _user_level[message.from_user.id] = None
     await db.ensure_cards(message.from_user.id)
     await send_next_card(message, message.from_user.id)
+
+
+@router.message(Command("levels"))
+async def cmd_levels(message: Message) -> None:
+    await db.ensure_cards(message.from_user.id)
+    levels = await db.list_levels()
+    if not levels:
+        await message.answer("Уровней пока нет — банк вопросов пуст.")
+        return
+    await message.answer(
+        "📂 <b>Выбери уровень roadmap</b> для тренировки\n"
+        "(или гоняй всю базу — алгоритм сам подберёт, что повторить):",
+        reply_markup=kb.levels_kb(levels),
+    )
+
+
+@router.callback_query(F.data.startswith("level:"))
+async def on_pick_level(callback: CallbackQuery) -> None:
+    value = callback.data.split(":")[1]
+    _user_level[callback.from_user.id] = None if value == "all" else int(value)
+    await callback.answer("Поехали!")
+    await send_next_card(callback.message, callback.from_user.id)
 
 
 @router.callback_query(F.data.startswith("show:"))

@@ -64,6 +64,19 @@ async def seed() -> dict[str, int]:
         )
         n_questions += 1
 
+    # Чистка сирот после реструктуризации roadmap: листовые темы без вопросов и
+    # уровни без дочерних тем. Карточки/ответы пользователя не трогаются (они
+    # привязаны к question_id, а вопросы сохраняются по uid).
+    await backend.execute(
+        """DELETE FROM topics WHERE parent_id IS NOT NULL
+           AND id NOT IN (SELECT DISTINCT topic_id FROM questions)"""
+    )
+    await backend.execute(
+        """DELETE FROM topics WHERE parent_id IS NULL
+           AND id NOT IN (SELECT DISTINCT parent_id FROM topics
+                          WHERE parent_id IS NOT NULL)"""
+    )
+
     return {"topics": len(slug_to_id), "questions": n_questions}
 
 

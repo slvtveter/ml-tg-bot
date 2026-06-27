@@ -23,3 +23,16 @@ def next_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="➡️ Следующий вопрос", callback_data="next")
     return kb.as_markup()
+
+
+def levels_kb(levels: list[dict]) -> InlineKeyboardMarkup:
+    """Список уровней roadmap + режим «вся база» (spaced repetition)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎲 Вся база (spaced repetition)", callback_data="level:all")
+    for lvl in levels:
+        kb.button(
+            text=f"{lvl['name']} · {lvl['total']}",
+            callback_data=f"level:{lvl['id']}",
+        )
+    kb.adjust(1)
+    return kb.as_markup()

@@ -117,39 +117,55 @@ async def ensure_cards(user_id: int) -> None:
 
 
 async def pick_due_card(
-    user_id: int, exclude_id: Optional[int] = None
+    user_id: int, exclude_id: Optional[int] = None, level_id: Optional[int] = None
 ) -> Optional[dict[str, Any]]:
     """Вернуть наиболее «просроченную» карточку (due <= сейчас).
 
     Если due-карточек нет — берём самую раннюю предстоящую, чтобы тренировка
     не упиралась в пустоту. exclude_id не даёт показать тот же вопрос дважды
-    подряд.
+    подряд. level_id ограничивает выбор одним уровнем (по родителю темы).
     """
     now = _utc_now_iso()
+    conds = ["c.user_id = ?"]
     params: list[Any] = [user_id]
-    exclude_sql = ""
     if exclude_id is not None:
-        exclude_sql = "AND q.id != ?"
+        conds.append("q.id != ?")
         params.append(exclude_id)
+    if level_id is not None:
+        conds.append("t.parent_id = ?")
+        params.append(level_id)
+    where = " AND ".join(conds)
 
-    base = """
+    base = f"""
         SELECT q.id, q.question, q.answer, q.difficulty, t.name AS topic_name,
                c.ease_factor, c.interval, c.repetitions, c.due
         FROM cards c
         JOIN questions q ON q.id = c.question_id
         JOIN topics t ON t.id = q.topic_id
-        WHERE c.user_id = ? {extra}
+        WHERE {where} {{due}}
         ORDER BY c.due ASC
         LIMIT 1
     """
     # Сначала — то, что уже пора повторять.
-    row = await backend.fetchone(
-        base.format(extra=f"{exclude_sql} AND c.due <= ?"), (*params, now)
-    )
+    row = await backend.fetchone(base.format(due="AND c.due <= ?"), (*params, now))
     if row is None:
         # Ничего не пора — берём ближайшее будущее (тренировка «наперёд»).
-        row = await backend.fetchone(base.format(extra=exclude_sql), params)
+        row = await backend.fetchone(base.format(due=""), params)
     return row
+
+
+async def list_levels() -> list[dict[str, Any]]:
+    """Уровни roadmap (top-level темы) с числом вопросов в каждом."""
+    return await backend.fetchall(
+        """SELECT lvl.id, lvl.name, COUNT(q.id) AS total
+           FROM topics lvl
+           LEFT JOIN topics t ON t.parent_id = lvl.id
+           LEFT JOIN questions q ON q.topic_id = t.id
+           WHERE lvl.parent_id IS NULL
+           GROUP BY lvl.id
+           HAVING total > 0
+           ORDER BY lvl.sort"""
+    )
 
 
 async def get_card_state(user_id: int, question_id: int) -> Optional[CardState]:
@@ -192,6 +208,15 @@ async def get_question(question_id: int) -> Optional[dict[str, Any]]:
     )
 
 
+async def count_due_cards(user_id: int) -> int:
+    """Сколько карточек уже пора повторить (due <= сейчас)."""
+    row = await backend.fetchone(
+        "SELECT COUNT(*) c FROM cards WHERE user_id=? AND due<=?",
+        (user_id, _utc_now_iso()),
+    )
+    return row["c"] if row else 0
+
+
 # ---------- статистика ----------
 
 async def get_stats(user_id: int) -> dict[str, Any]:
@@ -207,17 +232,18 @@ async def get_stats(user_id: int) -> dict[str, Any]:
         "SELECT COUNT(*) c FROM reviews WHERE user_id=?", (user_id,)
     ))["c"]
 
-    # Освоение по темам: доля вопросов с repetitions>=2 (вышли на нормальный
-    # интервал) внутри каждой темы.
-    by_topic = await backend.fetchall(
-        """SELECT t.name AS topic,
+    # Освоение по уровням: доля вопросов с repetitions>=2 (вышли на нормальный
+    # интервал) внутри каждого уровня roadmap (родитель темы).
+    by_level = await backend.fetchall(
+        """SELECT lvl.name AS level,
                   COUNT(*) AS total,
                   SUM(CASE WHEN c.repetitions>=2 THEN 1 ELSE 0 END) AS learned
            FROM questions q
            JOIN topics t ON t.id = q.topic_id
+           JOIN topics lvl ON lvl.id = t.parent_id
            LEFT JOIN cards c ON c.question_id = q.id AND c.user_id = ?
-           GROUP BY t.id
-           ORDER BY t.sort, t.name""",
+           GROUP BY lvl.id
+           ORDER BY lvl.sort""",
         (user_id,),
     )
     return {
@@ -225,5 +251,5 @@ async def get_stats(user_id: int) -> dict[str, Any]:
         "reviewed": reviewed,
         "due": due,
         "total_reviews": total_reviews,
-        "by_topic": by_topic,
+        "by_level": by_level,
     }

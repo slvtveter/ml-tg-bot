@@ -13,11 +13,15 @@
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Optional, Sequence
 
 import aiosqlite
 
 from bot.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class AiosqliteBackend:
@@ -81,8 +85,22 @@ class LibsqlBackend:
         return self._client
 
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> list[dict]:
-        rs = await self._ensure().execute(sql, list(params))
-        return [dict(zip(rs.columns, row)) for row in rs.rows]
+        # Retry на транзиентных сетевых сбоях (Turso по HTTP через Атлантику).
+        # На ошибке сбрасываем клиент, чтобы переподключиться. Все наши записи
+        # идемпотентны (upsert / INSERT OR IGNORE), кроме лога reviews — там
+        # редкий дубль безвреден.
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                rs = await self._ensure().execute(sql, list(params))
+                return [dict(zip(rs.columns, row)) for row in rs.rows]
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                self._client = None
+                if attempt < 2:
+                    logger.warning("Turso execute сбой (попытка %d): %s", attempt + 1, e)
+                    await asyncio.sleep(0.3 * (attempt + 1))
+        raise last_exc  # type: ignore[misc]
 
     async def executescript(self, script: str) -> None:
         statements = [s.strip() for s in script.split(";") if s.strip()]

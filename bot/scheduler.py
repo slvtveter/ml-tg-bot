@@ -35,6 +35,26 @@ async def send_question_of_the_day(bot: Bot) -> None:
             logger.warning("Не смог отправить вопрос дня %s: %s", user["user_id"], e)
 
 
+async def send_due_reminder(bot: Bot) -> None:
+    """Напоминание: если есть карточки к повторению — зовём в /quiz."""
+    subscribers = await db.get_subscribers()
+    for user in subscribers:
+        await db.ensure_cards(user["user_id"])
+        due = await db.count_due_cards(user["user_id"])
+        if due <= 0:
+            continue
+        text = (
+            f"⏰ <b>{due}</b> карточек ждут повторения. "
+            "Закрепи, пока не забылось — жми /quiz"
+        )
+        try:
+            await bot.send_message(user["chat_id"], text)
+        except TelegramForbiddenError:
+            await db.set_subscription(user["user_id"], False)
+        except Exception as e:  # noqa: BLE001 — рассылка не должна падать целиком
+            logger.warning("Не смог отправить напоминание %s: %s", user["user_id"], e)
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=settings.tz)
     scheduler.add_job(
@@ -44,6 +64,14 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         minute=settings.qotd_minute,
         args=[bot],
         id="question_of_the_day",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        send_due_reminder,
+        trigger="cron",
+        hour=settings.reminder_hour,
+        args=[bot],
+        id="due_reminder",
         replace_existing=True,
     )
     return scheduler

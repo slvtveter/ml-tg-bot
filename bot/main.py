@@ -14,7 +14,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, ErrorEvent
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import ClientSession, ClientTimeout, web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -36,12 +36,19 @@ WEBHOOK_PATH = "/webhook"
 
 async def set_commands(bot: Bot) -> None:
     await bot.set_my_commands([
-        BotCommand(command="quiz", description="Следующий вопрос"),
-        BotCommand(command="stats", description="Прогресс по темам"),
-        BotCommand(command="subscribe", description="Включить вопрос дня"),
-        BotCommand(command="unsubscribe", description="Выключить вопрос дня"),
+        BotCommand(command="quiz", description="Случайный вопрос (вся база)"),
+        BotCommand(command="levels", description="Выбрать уровень roadmap"),
+        BotCommand(command="stats", description="Прогресс по уровням"),
+        BotCommand(command="subscribe", description="Включить рассылку"),
+        BotCommand(command="unsubscribe", description="Выключить рассылку"),
         BotCommand(command="help", description="Справка"),
     ])
+
+
+async def on_error(event: ErrorEvent) -> None:
+    """Глобальный перехват ошибок хендлеров — единая лог-точка, процесс не падает."""
+    logger.error("Ошибка при обработке апдейта: %s", event.exception,
+                 exc_info=event.exception)
 
 
 def build_dispatcher() -> Dispatcher:
@@ -49,6 +56,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(common.router)
     dp.include_router(quiz.router)
     dp.include_router(stats.router)
+    dp.errors.register(on_error)
     return dp
 
 
@@ -135,8 +143,8 @@ async def main() -> None:
     )
     dp = build_dispatcher()
     scheduler = setup_scheduler(bot)
-    logger.info("«Вопрос дня» в %02d:%02d (%s)",
-                settings.qotd_hour, settings.qotd_minute, settings.tz)
+    logger.info("«Вопрос дня» в %02d:%02d, напоминание о повторах в %02d:00 (%s)",
+                settings.qotd_hour, settings.qotd_minute, settings.reminder_hour, settings.tz)
 
     if settings.webhook_url:
         await run_webhook(bot, dp, scheduler)

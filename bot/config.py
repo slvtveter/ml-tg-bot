@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     tz: str = "Europe/Moscow"
     qotd_hour: int = 9
     qotd_minute: int = 0
+    # Час ежедневного напоминания о карточках к повторению (due).
+    reminder_hour: int = 20
     db_path: str = "data/bot.db"
 
     # Turso/libSQL (прод-персистентность). Если пусто — берётся локальный SQLite.

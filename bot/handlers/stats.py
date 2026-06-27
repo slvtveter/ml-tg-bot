@@ -27,12 +27,13 @@ async def cmd_stats(message: Message) -> None:
         f"Начато (хоть раз отвечал): <b>{s['reviewed']}</b>",
         f"Готово к повторению сейчас: <b>{s['due']}</b>",
         f"Всего ответов дано: <b>{s['total_reviews']}</b>",
-        "\n<b>Освоение по темам</b> (вопросы, вышедшие на повтор):",
+        "\n<b>Освоение по уровням</b> (вопросы, вышедшие на повтор):",
     ]
-    for t in s["by_topic"]:
-        learned = t["learned"] or 0
-        total = t["total"] or 0
-        lines.append(f"{_bar(learned, total)}  {t['topic']} — {learned}/{total}")
+    for lvl in s["by_level"]:
+        learned = lvl["learned"] or 0
+        total = lvl["total"] or 0
+        lines.append(f"{_bar(learned, total)}  {lvl['level']} — {learned}/{total}")
 
     lines.append("\n💡 «Освоено» = вопрос успешно вспомнил ≥2 раз подряд.")
+    lines.append("Тренировка по уровню: /levels")
     await message.answer("\n".join(lines))
