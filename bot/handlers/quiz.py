@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import html
+import re
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -31,29 +32,71 @@ class AnswerStates(StatesGroup):
 _user_level: dict[int, Optional[int]] = {}        # фильтр по уровню (None = вся база)
 _user_difficulty: dict[int, Optional[int]] = {}   # фильтр по сложности (None = любая)
 _recent: dict[int, deque] = {}                    # недавно показанные id (анти-повтор)
+_current_card: dict[int, int] = {}                # последняя показанная карточка (для чата)
+_chat_history: dict[int, deque] = {}              # история диалога с репетитором
 RECENT_SIZE = 6
+CHAT_HISTORY_SIZE = 12  # последних реплик диалога держим в контексте
 
 
 def _remember(user_id: int, question_id: int) -> None:
     _recent.setdefault(user_id, deque(maxlen=RECENT_SIZE)).append(question_id)
+    _current_card[user_id] = question_id
 
 
 def _stars(difficulty: int) -> str:
     return "⭐" * max(1, min(3, difficulty))
 
 
+_BULLET = re.compile(r"^([•\-*–]\s|\d+[.)]\s)")
+
+
+def _reflow(text: str) -> str:
+    """Склеить жёстко перенесённые строки в абзацы — Telegram перенесёт сам.
+
+    Тексты в YAML вручную перенесены по ~76 символов, из-за чего на телефоне
+    они рвутся криво. Здесь склеиваем строки одного абзаца в одну, сохраняя
+    пустые строки (разделители абзацев), пункты списков и строки-формулы
+    (идут после строки, заканчивающейся двоеточием).
+    """
+    out: list[str] = []
+    buf = ""
+
+    def flush() -> None:
+        nonlocal buf
+        if buf:
+            out.append(buf)
+            buf = ""
+
+    for raw in text.split("\n"):
+        s = raw.strip()
+        if not s:
+            flush()
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        if not buf:
+            buf = s
+        elif _BULLET.match(s) or buf.rstrip().endswith(":"):
+            flush()
+            buf = s
+        else:
+            buf += " " + s
+    flush()
+    return "\n".join(out).strip()
+
+
 def _question_text(card: dict[str, Any]) -> str:
     return (
         f"📚 <b>{html.escape(card['topic_name'])}</b>  {_stars(card['difficulty'])}\n\n"
-        f"{html.escape(card['question'])}"
+        f"{html.escape(_reflow(card['question']))}"
     )
 
 
 def _answer_text(card: dict[str, Any]) -> str:
     return (
         f"📚 <b>{html.escape(card['topic_name'])}</b>  {_stars(card['difficulty'])}\n\n"
-        f"<b>Вопрос:</b>\n{html.escape(card['question'])}\n\n"
-        f"<b>Ответ:</b>\n{html.escape(card['answer'])}\n\n"
+        f"<b>Вопрос:</b>\n{html.escape(_reflow(card['question']))}\n\n"
+        f"<b>Ответ:</b>\n{html.escape(_reflow(card['answer']))}\n\n"
         f"<i>Насколько хорошо ты знал?</i>"
     )
 
@@ -107,6 +150,7 @@ async def cmd_quiz(message: Message, state: FSMContext) -> None:
     await state.clear()
     _user_level[message.from_user.id] = None
     _user_difficulty[message.from_user.id] = None
+    _chat_history.pop(message.from_user.id, None)  # свежая сессия — чистый контекст
     await db.ensure_cards(message.from_user.id)
     await send_next_card(message, message.from_user.id)
 
@@ -208,8 +252,8 @@ async def on_text_answer(message: Message, state: FSMContext) -> None:
 
     text = (
         f"{VERDICT_EMOJI[verdict]} <b>Оценка ответа</b>\n\n"
-        f"{html.escape(result['feedback'])}\n\n"
-        f"<b>Эталон:</b>\n{html.escape(card['answer'])}\n\n"
+        f"{html.escape(_reflow(result['feedback']))}\n\n"
+        f"<b>Эталон:</b>\n{html.escape(_reflow(card['answer']))}\n\n"
         f"<i>Записал как «{RATING_LABEL[verdict]}» · повтор {due_txt}</i>"
     )
     await thinking.edit_text(text)
@@ -242,3 +286,38 @@ async def on_rate(callback: CallbackQuery) -> None:
 async def on_next(callback: CallbackQuery) -> None:
     await callback.answer()
     await send_next_card(callback.message, callback.from_user.id)
+
+
+@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
+async def on_tutor_chat(message: Message) -> None:
+    """Свободный текст (вне режима ответа) = вопрос репетитору про текущую карточку.
+
+    Держит контекст последних реплик, чтобы можно было доспрашивать и связывать
+    вопросы между собой.
+    """
+    user_id = message.from_user.id
+    if not llm_grader.is_enabled():
+        await message.answer("💬 Чат-репетитор выключен (не задан GEMINI_API_KEY).")
+        return
+    qid = _current_card.get(user_id)
+    if qid is None:
+        await message.answer("Сначала возьми вопрос: /quiz — потом спрашивай по нему 💬")
+        return
+    card = await db.get_question(qid)
+    if card is None:
+        await message.answer("Не нашёл текущий вопрос. Жми /quiz")
+        return
+
+    history = _chat_history.setdefault(user_id, deque(maxlen=CHAT_HISTORY_SIZE))
+    await message.bot.send_chat_action(message.chat.id, "typing")
+    reply = await llm_grader.chat(
+        llm_grader.tutor_system(card["question"], card["answer"]),
+        list(history),
+        message.text,
+    )
+    if reply is None:
+        await message.answer("⚠️ Репетитор не ответил (Gemini недоступен). Попробуй ещё раз.")
+        return
+    history.append(("user", message.text))
+    history.append(("model", reply))
+    await message.answer(reply[:4000], parse_mode=None)

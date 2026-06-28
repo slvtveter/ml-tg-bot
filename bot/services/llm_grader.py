@@ -105,3 +105,59 @@ async def grade(question: str, reference: str, user_answer: str) -> Optional[dic
                 logger.warning("Gemini %s недоступна, пробую следующую: %s", model, e)
                 continue
     return None
+
+
+# ---------- Чат-репетитор (обсуждение карточки) ----------
+
+TUTOR_SYSTEM = (
+    "Ты — ML-репетитор, помогаешь студенту готовиться к собеседованию. Студент "
+    "задаёт уточняющие вопросы по текущей карточке. Отвечай по делу, понятно и "
+    "кратко, на русском; технические термины — в оригинале (английском). "
+    "Опирайся на ТЕКУЩИЙ ВОПРОС и его эталонный ответ ниже, но можешь углубляться, "
+    "давать интуицию и примеры. Если вопрос не по карточке — всё равно помоги. "
+    "НЕ используй markdown-разметку (никаких ** , ##, таблиц) — только простой текст."
+)
+
+
+def tutor_system(question: str, reference: str) -> str:
+    return (
+        f"{TUTOR_SYSTEM}\n\nТЕКУЩИЙ ВОПРОС:\n{question}\n\n"
+        f"ЭТАЛОННЫЙ ОТВЕТ:\n{reference}"
+    )
+
+
+async def _call_text(session: aiohttp.ClientSession, model: str, payload: dict) -> Optional[str]:
+    url = API_URL.format(model=model)
+    async with session.post(
+        url, params={"key": settings.gemini_api_key}, json=payload,
+        timeout=aiohttp.ClientTimeout(total=40),
+    ) as resp:
+        if resp.status == 200:
+            data = await resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        body = (await resp.text())[:200]
+        raise RuntimeError(f"HTTP {resp.status}: {body}")
+
+
+async def chat(system_text: str, history: list[tuple[str, str]], user_message: str) -> Optional[str]:
+    """Ответ репетитора с учётом истории. history: список (role, text), role в
+    {'user','model'}. None — если ключа нет или все модели недоступны."""
+    if not settings.gemini_api_key:
+        return None
+    contents = [{"role": role, "parts": [{"text": text}]} for role, text in history]
+    contents.append({"role": "user", "parts": [{"text": user_message}]})
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_text}]},
+        "contents": contents,
+        "generationConfig": {"temperature": 0.4},
+    }
+    async with aiohttp.ClientSession() as session:
+        for model in settings.gemini_model_list:
+            try:
+                text = await _call_text(session, model, payload)
+                if text:
+                    return text.strip()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Gemini chat %s недоступна: %s", model, e)
+                continue
+    return None

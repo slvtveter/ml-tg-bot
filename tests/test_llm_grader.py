@@ -57,3 +57,25 @@ async def test_grade_all_models_fail_returns_none(monkeypatch):
 
     monkeypatch.setattr(llm_grader, "_call", fake_call)
     assert await llm_grader.grade("q", "ref", "ans") is None
+
+
+async def test_chat_fallback_to_next_model(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_api_key", "fake-key")
+    monkeypatch.setattr(settings, "gemini_models", "m1,m2")
+    calls = []
+
+    async def fake_text(session, model, payload):
+        calls.append(model)
+        if model == "m1":
+            raise RuntimeError("HTTP 429")
+        return "ответ репетитора"
+
+    monkeypatch.setattr(llm_grader, "_call_text", fake_text)
+    out = await llm_grader.chat("system", [], "вопрос")
+    assert out == "ответ репетитора"
+    assert calls == ["m1", "m2"]
+
+
+async def test_chat_disabled_without_key(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    assert await llm_grader.chat("s", [], "q") is None

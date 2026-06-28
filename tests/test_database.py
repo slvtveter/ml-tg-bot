@@ -91,6 +91,31 @@ async def test_exclude_ids_avoids_repeat(populated):
     assert c2 is not None and c2["id"] != c1["id"]
 
 
+async def test_no_immediate_repeats_in_window(populated):
+    """Симуляция сессии: с анти-повтором (deque) карточки не повторяются в окне 6."""
+    from collections import deque
+
+    for i in range(3, 10):  # доводим до 10 вопросов
+        await backend.execute(
+            "INSERT INTO questions (topic_id, question, answer, difficulty, source, uid) "
+            "VALUES (?, ?, ?, ?, 'seed', ?)",
+            (populated["topic"], f"Q{i}", f"A{i}", 2, f"u{i}"),
+        )
+    settings.daily_new_limit = 100
+    await db.ensure_cards(USER)
+
+    recent: deque = deque(maxlen=6)
+    seq = []
+    for _ in range(20):
+        card = await db.pick_due_card(USER, exclude_ids=list(recent))
+        assert card is not None
+        assert card["id"] not in recent  # не повторяется в окне недавних
+        recent.append(card["id"])
+        seq.append(card["id"])
+    for i in range(len(seq)):  # ни один id не встречается среди предыдущих 6
+        assert seq[i] not in seq[max(0, i - 6):i]
+
+
 async def test_difficulty_filter(populated):
     await backend.execute(
         "INSERT INTO questions (topic_id, question, answer, difficulty, source, uid) "
