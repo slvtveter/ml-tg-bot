@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -83,6 +84,40 @@ def _reflow(text: str) -> str:
             buf += " " + s
     flush()
     return "\n".join(out).strip()
+
+
+_MD_CODE_BLOCK = re.compile(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", re.DOTALL)
+_MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+_MD_HEADER = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+_MD_BULLET = re.compile(r"(?m)^[ \t]*[-*]\s+")
+
+
+def md_to_html(text: str) -> str:
+    """Конвертировать Markdown (вывод LLM) в безопасный Telegram-HTML.
+
+    Telegram HTML устойчивее MarkdownV2 (не требует экранировать _ * . - и т.п.,
+    которых полно в ML-тексте: feature_selection, lambda*sum). Поддержано:
+    **жирный**, `код`, ```блоки```, # заголовки -> жирный, списки -> •, ссылки.
+    Курсив через * НЕ трогаем — иначе ломается умножение и snake_case.
+    """
+    stash: list[str] = []
+
+    def keep(snippet: str) -> str:
+        stash.append(snippet)
+        return f"\x00{len(stash) - 1}\x00"
+
+    text = _MD_CODE_BLOCK.sub(lambda m: keep(f"<pre>{html.escape(m.group(1).rstrip())}</pre>"), text)
+    text = _MD_INLINE_CODE.sub(lambda m: keep(f"<code>{html.escape(m.group(1))}</code>"), text)
+    text = html.escape(text)
+    text = _MD_HEADER.sub(lambda m: f"<b>{m.group(1).strip()}</b>", text)
+    text = _MD_BOLD.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _MD_LINK.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', text)
+    text = _MD_BULLET.sub("• ", text)
+    for i, snippet in enumerate(stash):
+        text = text.replace(f"\x00{i}\x00", snippet)
+    return text
 
 
 def _question_text(card: dict[str, Any]) -> str:
@@ -252,11 +287,14 @@ async def on_text_answer(message: Message, state: FSMContext) -> None:
 
     text = (
         f"{VERDICT_EMOJI[verdict]} <b>Оценка ответа</b>\n\n"
-        f"{html.escape(_reflow(result['feedback']))}\n\n"
+        f"{md_to_html(result['feedback'])}\n\n"
         f"<b>Эталон:</b>\n{html.escape(_reflow(card['answer']))}\n\n"
         f"<i>Записал как «{RATING_LABEL[verdict]}» · повтор {due_txt}</i>"
     )
-    await thinking.edit_text(text)
+    try:
+        await thinking.edit_text(text)
+    except TelegramBadRequest:
+        await thinking.edit_text(text, parse_mode=None)
     await send_next_card(message, message.from_user.id)
 
 
@@ -320,4 +358,8 @@ async def on_tutor_chat(message: Message) -> None:
         return
     history.append(("user", message.text))
     history.append(("model", reply))
-    await message.answer(reply[:4000], parse_mode=None)
+    safe = reply[:4000]
+    try:
+        await message.answer(md_to_html(safe))
+    except TelegramBadRequest:
+        await message.answer(safe, parse_mode=None)

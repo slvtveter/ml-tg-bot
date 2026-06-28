@@ -1,5 +1,35 @@
-"""Тесты рефлоу текста карточек (склейка жёстко перенесённых строк)."""
-from bot.handlers.quiz import _reflow
+"""Тесты форматирования: рефлоу карточек и markdown->HTML для вывода LLM."""
+from bot.handlers.quiz import _reflow, md_to_html
+
+
+def test_md_bold():
+    assert md_to_html("это **важно** да") == "это <b>важно</b> да"
+
+
+def test_md_inline_code():
+    assert md_to_html("зови `func()`") == "зови <code>func()</code>"
+
+
+def test_md_escapes_html():
+    assert md_to_html("a < b & c > d") == "a &lt; b &amp; c &gt; d"
+
+
+def test_md_header_to_bold():
+    assert md_to_html("## Заголовок") == "<b>Заголовок</b>"
+
+
+def test_md_bullets():
+    assert md_to_html("- раз\n- два") == "• раз\n• два"
+
+
+def test_md_code_block_preserved_and_escaped():
+    out = md_to_html("```python\nx = a < b\n```")
+    assert "<pre>" in out and "x = a &lt; b" in out
+
+
+def test_md_underscores_not_touched():
+    # snake_case и умножение не должны ломаться
+    assert md_to_html("feature_selection и lambda * sum") == "feature_selection и lambda * sum"
 
 
 def test_joins_paragraph():
